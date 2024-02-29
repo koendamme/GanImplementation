@@ -1,37 +1,47 @@
 from GAN import Discriminator, Generator
 from dataset import Dataset
 import torch
-from utils import weights_init
+from utils import weights_init, generate_images
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import wandb
 
+
+config = dict(
+    noise_vector_length=150,
+    n_epochs=100,
+    lr=.001,
+    batch_size=32,
+    p_dropout_G=.2,
+    p_dropout_D=.2,
+    digit=5,
+    architecture="GAN"
+)
+
+wandb.init(project="MNIST-Simple-GAN", config=config)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-noise_vector_length = 100
-n_epochs = 100
-lr = .0001
-
 dataset = Dataset()
-dataloader = DataLoader(dataset.get_subset(5), batch_size=16, shuffle=True)
+dataloader = DataLoader(dataset.get_subset(5), batch_size=config["batch_size"], shuffle=True, pin_memory=True)
 
-G = Generator(noise_vector_length, dataset.get_subset(5)[0][0].shape)
+G = Generator(config["noise_vector_length"], dataset.get_subset(5)[0][0].shape, p_dropout=config["p_dropout_G"]).to(device)
 G.apply(weights_init)
-D = Discriminator(dataset.get_subset(5)[0][0].shape)
+D = Discriminator(dataset.get_subset(5)[0][0].shape, p_dropout=config["p_dropout_G"]).to(device)
 D.apply(weights_init)
-
-G = G.to(device)
-D = D.to(device)
 
 criterion = torch.nn.BCELoss()
 
-gen_optimizer = torch.optim.Adam(G.parameters(), lr=lr)
-discr_optimizer = torch.optim.Adam(D.parameters(), lr=lr)
+gen_optimizer = torch.optim.Adam(G.parameters(), lr=config["lr"])
+discr_optimizer = torch.optim.Adam(D.parameters(), lr=config["lr"])
 
-for i in tqdm(range(n_epochs)):
+wandb.watch(G, criterion, log="all", log_freq=10)
+wandb.watch(D, criterion, log="all", log_freq=10)
+
+for i_epoch in tqdm(range(config["n_epochs"])):
     running_discr_loss, running_gen_loss = 0.0, 0.0
 
-    for batch, _ in dataloader:
+    for i_batch, (batch, _) in enumerate(dataloader):
         batch = batch.to(device)
 
         # Update Discriminator
@@ -42,7 +52,7 @@ for i in tqdm(range(n_epochs)):
         loss_D_real.backward()
 
         # Train with fake batch
-        noise_batch = torch.normal(0, 1, size=(batch.shape[0], noise_vector_length), device=device)
+        noise_batch = torch.normal(0, 1, size=(batch.shape[0], config["noise_vector_length"]), device=device)
         fake = G(noise_batch)
         discr_fake_output = D(fake.detach())
 
@@ -62,4 +72,15 @@ for i in tqdm(range(n_epochs)):
         loss_G.backward()
         gen_optimizer.step()
 
-    # print(f"Discriminiator loss: {running_discr_loss/(len(dataloader))}, Generator loss: {running_gen_loss/len(dataloader)}")
+        if (i_batch + 1) % 10 == 0:
+            wandb.log({
+                "D_loss": loss_D,
+                "G_loss": loss_G,
+                "epoch": i_epoch
+            })
+
+    images = generate_images(8, G, dataset.get_subset(5)[0][0].shape, config["noise_vector_length"], device)
+    images_to_log = [wandb.Image(image, caption="Example image") for image in images]
+    wandb.log({
+        "example_batch": images_to_log
+    })
